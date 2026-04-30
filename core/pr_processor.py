@@ -54,7 +54,6 @@ class PRProcessor:
         # 3. Diff
         log.info("📦 A obter diff...")
         diff = self.github.get_pr_diff(owner, repo, pr_number)
-        self.github.get_pr_files(owner, repo, pr_number)
 
         # 4. SonarQube (best-effort)
         sonar_findings = None

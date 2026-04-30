@@ -69,7 +69,7 @@ def format_review_body(result: ReviewResult, pr_title: str) -> str:
                         lines += [
                             "<details><summary>💡 Sugestão</summary>",
                             "",
-                            f"```\n{issue['suggestion']}\n```",
+                            issue["suggestion"],
                             "",
                             "</details>",
                             "",
@@ -126,7 +126,7 @@ def build_inline_comments(result: ReviewResult, pr_files: list[dict]) -> list[di
         body = f"**{cat}** {SEVERITY_EMOJI.get(issue.get('severity', 'minor'), '')}\n\n"
         body += issue.get("message", "")
         if issue.get("suggestion"):
-            body += f"\n\n**Sugestão:**\n```\n{issue['suggestion']}\n```"
+            body += f"\n\n**Sugestão:**\n{issue['suggestion']}"
 
         inline.append({"path": filename, "position": position, "body": body})
 

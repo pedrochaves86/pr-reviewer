@@ -30,7 +30,7 @@ class Settings:
 
     # ── Anthropic (Claude) ─────────────────────────────────────────────────
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
-    claude_model: str = field(default_factory=lambda: os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514"))
+    claude_model: str = field(default_factory=lambda: os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"))
 
     # ── SonarQube (opcional) ───────────────────────────────────────────────
     sonar_url: str = field(default_factory=lambda: os.getenv("SONAR_URL", ""))

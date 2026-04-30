@@ -37,7 +37,7 @@ ENV_SECTIONS = {
             "key": "CLAUDE_MODEL",
             "label": "Claude Model",
             "secret": False,
-            "help": "Use a model available in your account, for example claude-sonnet-4-5-20250929",
+            "help": "Use a model available in your account, for example claude-sonnet-4-6 (default)",
         },
     ],
 }

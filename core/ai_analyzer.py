@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 import anthropic
+from anthropic import APIStatusError, APIConnectionError, AuthenticationError, RateLimitError
 
 from config.settings import Settings
 
@@ -113,7 +114,7 @@ class AIAnalyzer:
     def _matches_changed_file(target_path: str, changed_lines: dict[str, set[int]]) -> Optional[str]:
         normalized_target = (target_path or "").replace("\\", "/")
         for changed_path in changed_lines:
-            if normalized_target.endswith(changed_path) or normalized_target.endswith(changed_path.split("/")[-1]):
+            if normalized_target.endswith(changed_path):
                 return changed_path
         return None
 
@@ -167,18 +168,39 @@ class AIAnalyzer:
         user_msg = self._build_prompt(pr_info, diff_truncated, sonar_findings, checkmarx_findings)
 
         log.info(f"A enviar diff para Claude ({len(diff_truncated)} chars)...")
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-        )
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                system=[{
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=[{"role": "user", "content": user_msg}],
+            )
+        except AuthenticationError:
+            log.error("Anthropic API key inválida ou sem permissões.")
+            raise
+        except RateLimitError as e:
+            log.warning(f"Rate limit Anthropic atingido: {e}")
+            raise
+        except APIConnectionError as e:
+            log.error(f"Erro de ligação à API Anthropic: {e}")
+            raise
+        except APIStatusError as e:
+            log.error(f"Erro da API Anthropic ({e.status_code}): {e.message}")
+            raise
+
+        cache_read = getattr(response.usage, "cache_read_input_tokens", 0)
+        if cache_read:
+            log.debug(f"Prompt cache hit: {cache_read} tokens lidos da cache.")
 
         raw_text = response.content[0].text.strip()
-        # Limpa eventual markdown
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("\n", 1)[1]
-            raw_text = raw_text.rsplit("```", 1)[0]
+        # Extrai JSON de dentro de um bloco markdown, se presente
+        md_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_text)
+        if md_match:
+            raw_text = md_match.group(1)
 
         try:
             data = json.loads(raw_text)
