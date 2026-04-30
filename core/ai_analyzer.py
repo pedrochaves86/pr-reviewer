@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import anthropic
 from anthropic import APIStatusError, APIConnectionError, AuthenticationError, RateLimitError
+import requests
 
 from config.settings import Settings
 
@@ -63,11 +64,40 @@ Regras:
 """
 
 
+# Erros que afetam toda a conta — não adianta tentar outro modelo
+_ACCOUNT_LEVEL_ERRORS = ("credit", "balance", "billing", "unauthorized", "invalid x-api-key")
+
+
+def _is_account_level_error(exc: APIStatusError) -> bool:
+    """True quando o erro afeta toda a conta (créditos, autenticação) — fallback inútil."""
+    msg = ""
+    try:
+        msg = exc.body.get("error", {}).get("message", "") if isinstance(exc.body, dict) else str(exc.body)
+    except Exception:
+        pass
+    return any(keyword in msg.lower() for keyword in _ACCOUNT_LEVEL_ERRORS)
+
+
+OPENAI_API = "https://api.openai.com/v1/chat/completions"
+
+
+class _OpenAIResponse:
+    """Wrapper mínimo para normalizar a resposta da OpenAI API ao formato Anthropic."""
+    def __init__(self, text: str):
+        self.content = [type("_Block", (), {"text": text})()]
+        self.usage = type("_Usage", (), {"cache_read_input_tokens": 0})()
+
+
 class AIAnalyzer:
     def __init__(self, settings: Settings):
         self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         self.model = settings.claude_model
+        self._fallback_models = [
+            m for m in settings.claude_fallback_models if m != self.model
+        ]
         self.language = settings.review_language
+        self._openai_api_key = settings.openai_api_key
+        self._openai_model = settings.openai_model
 
     @staticmethod
     def _changed_lines(diff: str) -> dict[str, set[int]]:
@@ -148,6 +178,77 @@ class AIAnalyzer:
             return None
         return {**findings, "top_vulnerabilities": filtered}
 
+    def _call_with_fallback(self, user_msg: str):
+        """Tenta Anthropic (modelo principal + fallbacks) e, se a conta falhar, usa OpenAI."""
+        models_to_try = [self.model] + self._fallback_models
+        last_exc: Exception | None = None
+
+        for attempt, model in enumerate(models_to_try):
+            if attempt > 0:
+                log.warning(f"A tentar modelo de fallback Anthropic: {model}")
+            try:
+                response = self.client.messages.create(
+                    model=model,
+                    max_tokens=4096,
+                    system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                    messages=[{"role": "user", "content": user_msg}],
+                )
+                if attempt > 0:
+                    log.info(f"Sucesso com modelo de fallback Anthropic: {model}")
+                return response
+            except (AuthenticationError, RateLimitError, APIConnectionError):
+                raise
+            except APIStatusError as e:
+                if _is_account_level_error(e):
+                    log.warning(f"Conta Anthropic indisponível ({e.status_code}). A tentar OpenAI...")
+                    return self._call_openai(user_msg)
+                log.warning(f"Modelo '{model}' falhou ({e.status_code}): {e.message}")
+                last_exc = e
+
+        raise last_exc  # type: ignore[misc]
+
+    def _call_openai(self, user_msg: str):
+        """Chama a OpenAI API como fallback quando a conta Anthropic não está disponível."""
+        if not self._openai_api_key:
+            raise RuntimeError(
+                "Anthropic sem créditos e OPENAI_API_KEY não configurada. "
+                "Adiciona créditos em https://console.anthropic.com/settings/billing "
+                "ou define OPENAI_API_KEY no .env (https://platform.openai.com/api-keys)."
+            )
+
+        log.info(f"A usar OpenAI como fallback (modelo: {self._openai_model})...")
+        resp = requests.post(
+            OPENAI_API,
+            headers={
+                "Authorization": f"Bearer {self._openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self._openai_model,
+                "max_tokens": 4096,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+            },
+            timeout=120,
+        )
+        if resp.status_code == 401:
+            raise RuntimeError("OpenAI API key inválida ou sem permissões. Verifica OPENAI_API_KEY.")
+        if resp.status_code == 429:
+            err_code = resp.json().get("error", {}).get("code", "")
+            if err_code == "insufficient_quota":
+                raise RuntimeError(
+                    "Quota OpenAI esgotada — a conta não tem créditos. "
+                    "Adiciona créditos em https://platform.openai.com/settings/billing/overview "
+                    "ou recarrega a conta Anthropic em https://console.anthropic.com/settings/billing."
+                )
+            raise RuntimeError("OpenAI rate limit atingido. Tenta novamente dentro de alguns segundos.")
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"]
+        log.info(f"Resposta recebida de OpenAI ({self._openai_model}).")
+        return _OpenAIResponse(text)
+
     def analyze(
         self,
         pr_info: dict,
@@ -168,29 +269,7 @@ class AIAnalyzer:
         user_msg = self._build_prompt(pr_info, diff_truncated, sonar_findings, checkmarx_findings)
 
         log.info(f"A enviar diff para Claude ({len(diff_truncated)} chars)...")
-        try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=4096,
-                system=[{
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }],
-                messages=[{"role": "user", "content": user_msg}],
-            )
-        except AuthenticationError:
-            log.error("Anthropic API key inválida ou sem permissões.")
-            raise
-        except RateLimitError as e:
-            log.warning(f"Rate limit Anthropic atingido: {e}")
-            raise
-        except APIConnectionError as e:
-            log.error(f"Erro de ligação à API Anthropic: {e}")
-            raise
-        except APIStatusError as e:
-            log.error(f"Erro da API Anthropic ({e.status_code}): {e.message}")
-            raise
+        response = self._call_with_fallback(user_msg)
 
         cache_read = getattr(response.usage, "cache_read_input_tokens", 0)
         if cache_read:

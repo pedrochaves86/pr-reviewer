@@ -3,7 +3,9 @@ import os
 import re
 import html
 
+import requests
 import streamlit as st
+from anthropic import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 from dotenv import dotenv_values, load_dotenv, set_key
 
 from config.settings import Settings
@@ -39,6 +41,14 @@ ENV_SECTIONS = {
             "label": "Claude Model",
             "secret": False,
             "help": "Use a model available in your account, for example claude-sonnet-4-6 (default)",
+        },
+    ],
+    "OpenAI (fallback)": [
+        {
+            "key": "OPENAI_API_KEY",
+            "label": "OpenAI API Key",
+            "secret": True,
+            "help": "Optional fallback when Anthropic has no credits.\n1) Open https://platform.openai.com/api-keys\n2) Generate a new API key\n3) Paste it here",
         },
     ],
 }
@@ -108,15 +118,100 @@ def ensure_state():
 
 
 _GITHUB_PR_RE = re.compile(
-    r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/pull/\d+$"
+    r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/pull/\d+/?(?:[?#].*)?$"
 )
 
 
 def _validate_pr_url(url: str) -> str | None:
     """Return None if valid, or an error message string if invalid."""
     if not _GITHUB_PR_RE.match(url):
-        return f"Invalid PR URL: '{url}'. Must match https://github.com/<org>/<repo>/pull/<number>"
+        return (
+            f"Invalid PR URL: '{url}'. Must match "
+            "https://github.com/<org>/<repo>/pull/<number>"
+        )
     return None
+
+
+def _format_user_error(exc: Exception) -> str:
+    """Map technical exceptions to actionable user-facing messages."""
+    anthropic_error = _format_anthropic_error(exc)
+    if anthropic_error:
+        return anthropic_error
+
+    github_error = _format_github_http_error(exc)
+    if github_error:
+        return github_error
+
+    return str(exc)
+
+
+def _format_anthropic_error(exc: Exception) -> str | None:
+    if isinstance(exc, AuthenticationError):
+        return "Anthropic authentication failed. Check ANTHROPIC_API_KEY."
+    if isinstance(exc, RateLimitError):
+        return (
+            "Anthropic usage limit reached for the selected model. "
+            "Try again later or switch to a model available in your plan."
+        )
+    if isinstance(exc, APIConnectionError):
+        return "Could not connect to Anthropic API. Check your network and try again."
+    if isinstance(exc, APIStatusError):
+        return _format_anthropic_status_error(exc)
+    return None
+
+
+def _format_anthropic_status_error(exc: APIStatusError) -> str:
+    status = getattr(exc, "status_code", None)
+    if status == 429:
+        return (
+            "Anthropic rate limit/quota reached. "
+            "Wait a bit and retry, or use a model with available quota."
+        )
+    if status == 401:
+        return "Anthropic authentication failed. Check ANTHROPIC_API_KEY."
+    if status == 400:
+        return _format_anthropic_bad_request(exc)
+    return f"Anthropic API error (HTTP {status})."
+
+
+def _format_anthropic_bad_request(exc: APIStatusError) -> str:
+    raw_msg = ""
+    try:
+        raw_msg = exc.body.get("error", {}).get("message", "") if isinstance(exc.body, dict) else str(exc.body)
+    except Exception:
+        pass
+    if "credit" in raw_msg.lower() or "balance" in raw_msg.lower():
+        return (
+            "Saldo de créditos Anthropic insuficiente. "
+            "Opções: recarrega em https://console.anthropic.com/settings/billing "
+            "ou define OPENAI_API_KEY no .env como fallback (https://platform.openai.com/api-keys)."
+        )
+    return f"Anthropic: {raw_msg}" if raw_msg else "Anthropic API error (HTTP 400)."
+
+
+def _format_github_http_error(exc: Exception) -> str | None:
+    if not isinstance(exc, requests.HTTPError):
+        return None
+
+    response = exc.response
+    status = response.status_code if response is not None else None
+    host = ""
+    if response is not None and response.request is not None:
+        host = response.request.url or ""
+
+    if "api.github.com" not in host:
+        return None
+
+    if status in (401, 403):
+        return (
+            "GitHub authentication/permissions failed. "
+            "Check GITHUB_TOKEN and ensure it has repo/pull_requests access."
+        )
+    if status == 404:
+        return "PR not found or you do not have access to this repository."
+    if status == 429:
+        return "GitHub API rate limit reached. Please try again in a few minutes."
+    return f"GitHub API error (HTTP {status})."
 
 
 def render_settings_tab():
@@ -287,7 +382,7 @@ def _check_pr_statuses(urls: list[str]) -> dict[str, dict]:
             statuses[url] = {
                 "title": url,
                 "state": "error",
-                "error": str(exc),
+                "error": _format_user_error(exc),
             }
 
     return statuses
@@ -362,7 +457,7 @@ def _auto_refresh_pr_statuses():
     try:
         new_statuses = _check_pr_statuses(missing_urls)
     except Exception as exc:
-        err = str(exc)
+        err = _format_user_error(exc)
         new_statuses = {
             url: {
                 "title": url,
@@ -452,8 +547,9 @@ def render_analyse_tab():
             processed_count, skipped_merged_count = _run_analysis(urls, push_log)
             _render_analysis_summary(processed_count, skipped_merged_count, push_log)
         except Exception as exc:
-            push_log(f"ERROR: {exc}")
-            st.error(f"Analysis failed: {exc}")
+            friendly_error = _format_user_error(exc)
+            push_log(f"ERROR: {friendly_error}")
+            st.error(f"Analysis failed: {friendly_error}")
         finally:
             root_logger.removeHandler(log_handler)
 

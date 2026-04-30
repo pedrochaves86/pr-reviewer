@@ -30,7 +30,24 @@ class Settings:
 
     # ── Anthropic (Claude) ─────────────────────────────────────────────────
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
-    claude_model: str = field(default_factory=lambda: os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"))
+    claude_model: str = field(
+        default_factory=lambda: (os.getenv("CLAUDE_MODEL", "") or "claude-sonnet-4-6")
+    )
+    # Modelos alternativos tentados em sequência se o principal falhar (separados por vírgula)
+    claude_fallback_models: list[str] = field(
+        default_factory=lambda: [
+            m.strip()
+            for m in (os.getenv("CLAUDE_FALLBACK_MODELS", "") or "").split(",")
+            if m.strip()
+        ] or ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"]
+    )
+
+    # ── OpenAI (fallback quando Anthropic sem créditos) ───────────────────
+    # https://platform.openai.com/api-keys
+    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
+    openai_model: str = field(
+        default_factory=lambda: (os.getenv("OPENAI_MODEL", "") or "gpt-4o")
+    )
 
     # ── SonarQube (opcional) ───────────────────────────────────────────────
     sonar_url: str = field(default_factory=lambda: os.getenv("SONAR_URL", ""))
