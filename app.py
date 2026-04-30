@@ -178,13 +178,13 @@ def render_settings_tab():
                     )
                 st.session_state.env_values[key] = value.strip()
 
-    col_save, col_reload, _ = st.columns([1, 1, 6], gap="small")
+    col_save, col_reload, _ = st.columns([2, 2, 4], gap="small")
     with col_save:
-        if st.button("Save Settings"):
+        if st.button("Save Settings", use_container_width=True):
             save_env_map(st.session_state.env_values)
             st.success("Settings saved to .env")
     with col_reload:
-        if st.button("Reload from .env"):
+        if st.button("Reload from .env", use_container_width=True):
             st.session_state.env_values = load_env_map()
             st.success("Settings reloaded")
             st.rerun()
@@ -215,13 +215,13 @@ def render_analyse_tab():
             placeholder="https://github.com/org/repo/pull/123",
         )
 
-    col_add, col_remove, _ = st.columns([1, 1, 6], gap="small")
+    col_add, col_remove, _ = st.columns([2, 2, 4], gap="small")
     with col_add:
-        if st.button("Add URL Line"):
+        if st.button("Add URL Line", use_container_width=True):
             st.session_state.pr_urls.append("")
             st.rerun()
     with col_remove:
-        if st.button("Remove Last Line") and len(st.session_state.pr_urls) > 1:
+        if st.button("Remove Last Line", use_container_width=True) and len(st.session_state.pr_urls) > 1:
             st.session_state.pr_urls.pop()
             st.rerun()
 
@@ -273,19 +273,15 @@ def render_analyse_tab():
             root_logger.removeHandler(log_handler)
 
 
-st.set_page_config(page_title=APP_TITLE, page_icon="PR", layout="wide")
+st.set_page_config(page_title=APP_TITLE, page_icon="🤖", layout="centered")
 st.markdown(
     """
 <style>
-/* Keep app content centered and readable on large screens */
 section.main > div.block-container {
-    max-width: 920px;
-    margin: 0 auto;
-    padding-top: 1.25rem;
-    padding-bottom: 1.25rem;
+    padding-top: 2rem;
+    padding-bottom: 2rem;
 }
 
-/* Smaller buttons with better wrapping behavior */
 .stButton > button {
     width: auto;
     min-height: 2rem;
@@ -294,26 +290,18 @@ section.main > div.block-container {
     border-radius: 0.45rem;
 }
 
-/* Compact spacing for narrow screens */
-@media (max-width: 768px) {
+@media (max-width: 640px) {
     section.main > div.block-container {
-        max-width: 100%;
-        padding-left: 0.8rem;
-        padding-right: 0.8rem;
-    }
-
-    .stButton > button {
-        min-height: 1.9rem;
-        padding: 0.25rem 0.65rem;
-        font-size: 0.84rem;
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
     }
 }
 </style>
 """,
     unsafe_allow_html=True,
 )
-st.title(APP_TITLE)
-st.caption("Simple UI to configure .env and run PR analysis with live step-by-step logs.")
+st.title("🤖 " + APP_TITLE)
+st.caption("Analyse GitHub Pull Requests automatically using Claude AI.")
 
 ensure_state()
 
