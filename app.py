@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 import streamlit as st
 from dotenv import dotenv_values, load_dotenv, set_key
@@ -8,6 +9,7 @@ from config.settings import Settings
 from core.pr_processor import PRProcessor
 
 ENV_FILE = ".env"
+APP_TITLE = "PR Auto-Reviewer"
 
 ENV_SECTIONS = {
     "Required for Scan": [
@@ -99,6 +101,48 @@ def ensure_state():
 
     if "analysis_logs" not in st.session_state:
         st.session_state.analysis_logs = []
+
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+
+_GITHUB_PR_RE = re.compile(
+    r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/pull/\d+$"
+)
+
+
+def _validate_pr_url(url: str) -> str | None:
+    """Return None if valid, or an error message string if invalid."""
+    if not _GITHUB_PR_RE.match(url):
+        return f"Invalid PR URL: '{url}'. Must match https://github.com/<org>/<repo>/pull/<number>"
+    return None
+
+
+def _get_app_password() -> str | None:
+    """Return the configured APP_PASSWORD, or None if not set (open access)."""
+    try:
+        pwd = st.secrets.get("APP_PASSWORD", "")
+        return pwd if pwd else None
+    except Exception:
+        return None
+
+
+def render_login_gate():
+    """Render a password prompt and block the rest of the app until authenticated."""
+    required = _get_app_password()
+    if required is None or st.session_state.authenticated:
+        return True  # no password configured, or already authenticated
+
+    st.title(APP_TITLE)
+    st.subheader("Access")
+    pwd = st.text_input("Password", type="password", key="login_pwd")
+    if st.button("Enter"):
+        if pwd == required:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
 
 
 def render_settings_tab():
@@ -194,6 +238,12 @@ def render_analyse_tab():
             st.error("Please add at least one valid PR URL.")
             return
 
+        errors = [msg for url in urls if (msg := _validate_pr_url(url))]
+        if errors:
+            for e in errors:
+                st.error(e)
+            return
+
         st.session_state.analysis_logs = []
         push_log("Starting analysis...")
 
@@ -223,7 +273,7 @@ def render_analyse_tab():
             root_logger.removeHandler(log_handler)
 
 
-st.set_page_config(page_title="PR Auto-Reviewer", page_icon="PR", layout="wide")
+st.set_page_config(page_title=APP_TITLE, page_icon="PR", layout="wide")
 st.markdown(
     """
 <style>
@@ -262,10 +312,13 @@ section.main > div.block-container {
 """,
     unsafe_allow_html=True,
 )
-st.title("PR Auto-Reviewer")
+st.title(APP_TITLE)
 st.caption("Simple UI to configure .env and run PR analysis with live step-by-step logs.")
 
 ensure_state()
+
+if not render_login_gate():
+    st.stop()
 
 tab_analyse, tab_settings = st.tabs(["Analyse", "Settings"])
 
