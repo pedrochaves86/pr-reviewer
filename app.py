@@ -320,10 +320,13 @@ ensure_state()
 if not render_login_gate():
     st.stop()
 
-tab_analyse, tab_settings = st.tabs(["Analyse", "Settings"])
-
-with tab_analyse:
+if _running_on_cloud():
     render_analyse_tab()
+else:
+    tab_analyse, tab_settings = st.tabs(["Analyse", "Settings"])
 
-with tab_settings:
-    render_settings_tab()
+    with tab_analyse:
+        render_analyse_tab()
+
+    with tab_settings:
+        render_settings_tab()
