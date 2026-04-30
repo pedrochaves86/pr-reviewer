@@ -102,9 +102,6 @@ def ensure_state():
     if "analysis_logs" not in st.session_state:
         st.session_state.analysis_logs = []
 
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-
 
 _GITHUB_PR_RE = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/pull/\d+$"
@@ -116,33 +113,6 @@ def _validate_pr_url(url: str) -> str | None:
     if not _GITHUB_PR_RE.match(url):
         return f"Invalid PR URL: '{url}'. Must match https://github.com/<org>/<repo>/pull/<number>"
     return None
-
-
-def _get_app_password() -> str | None:
-    """Return the configured APP_PASSWORD, or None if not set (open access)."""
-    try:
-        pwd = st.secrets.get("APP_PASSWORD", "")
-        return pwd if pwd else None
-    except Exception:
-        return None
-
-
-def render_login_gate():
-    """Render a password prompt and block the rest of the app until authenticated."""
-    required = _get_app_password()
-    if required is None or st.session_state.authenticated:
-        return True  # no password configured, or already authenticated
-
-    st.title(APP_TITLE)
-    st.subheader("Access")
-    pwd = st.text_input("Password", type="password", key="login_pwd")
-    if st.button("Enter"):
-        if pwd == required:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
-    return False
 
 
 def render_settings_tab():
@@ -304,9 +274,6 @@ st.title("🤖 " + APP_TITLE)
 st.caption("Analyse GitHub Pull Requests automatically using Claude AI.")
 
 ensure_state()
-
-if not render_login_gate():
-    st.stop()
 
 if _running_on_cloud():
     render_analyse_tab()
