@@ -1,6 +1,5 @@
 """
-Formata o ReviewResult em texto Markdown para a review GitHub
-e constrói a lista de inline comments.
+Formata o ReviewResult em texto Markdown para a review GitHub.
 """
 
 from core.ai_analyzer import ReviewResult
@@ -91,43 +90,3 @@ def format_review_body(result: ReviewResult, pr_title: str) -> str:
     ]
 
     return "\n".join(lines)
-
-
-def build_inline_comments(result: ReviewResult, pr_files: list[dict]) -> list[dict]:
-    """
-    Tenta construir inline comments para issues com ficheiro conhecido.
-    O GitHub exige `position` (linha no diff), não nº de linha absoluto.
-    Mapeia de forma best-effort.
-    """
-    # Mapa: filename → lista de posições de diff
-    diff_positions: dict[str, list[int]] = {}
-    for f in pr_files:
-        patch = f.get("patch", "")
-        diff_positions[f["filename"]] = list(range(1, patch.count("\n") + 2))
-
-    inline = []
-    for issue in result.issues:
-        filename = issue.get("file", "")
-        if not filename or filename not in diff_positions:
-            continue
-
-        positions = diff_positions[filename]
-        if not positions:
-            continue
-
-        # Tenta usar a linha sugerida; se não disponível, aponta para posição 1
-        try:
-            line_hint = int(issue.get("line_hint") or 1)
-            position = min(line_hint, max(positions))
-        except (ValueError, TypeError):
-            position = 1
-
-        cat = CATEGORY_LABEL.get(issue.get("category", ""), issue.get("category", ""))
-        body = f"**{cat}** {SEVERITY_EMOJI.get(issue.get('severity', 'minor'), '')}\n\n"
-        body += issue.get("message", "")
-        if issue.get("suggestion"):
-            body += f"\n\n**Sugestão:**\n{issue['suggestion']}"
-
-        inline.append({"path": filename, "position": position, "body": body})
-
-    return inline
