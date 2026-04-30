@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import html
 
 import streamlit as st
 from dotenv import dotenv_values, load_dotenv, set_key
@@ -102,6 +103,9 @@ def ensure_state():
     if "analysis_logs" not in st.session_state:
         st.session_state.analysis_logs = []
 
+    if "pr_statuses" not in st.session_state:
+        st.session_state.pr_statuses = {}
+
 
 _GITHUB_PR_RE = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/pull/\d+$"
@@ -173,18 +177,47 @@ def build_settings_for_run(pr_urls: list[str]) -> Settings:
     return settings
 
 
-def render_analyse_tab():
-    st.subheader("Analyse PRs")
-    st.caption("Add one PR URL per line and click Analyse.")
+def _get_pr_merged_status(processor: PRProcessor, pr_url: str) -> tuple[bool, str]:
+    """Return whether the PR is already merged plus a display title."""
+    owner, repo, pr_number = processor.github.parse_pr_url(pr_url)
+    pr_info = processor.github.get_pr_info(owner, repo, pr_number)
+    title = pr_info.get("title", f"PR #{pr_number}")
+    is_merged = bool(pr_info.get("merged")) or bool(pr_info.get("merged_at"))
+    return is_merged, title
 
+
+def _clear_pr_url(index: int):
+    """Clear a single PR URL input safely via callback."""
+    if index < len(st.session_state.pr_urls):
+        st.session_state.pr_urls[index] = ""
+    key = f"pr_url_{index}"
+    if key in st.session_state:
+        st.session_state[key] = ""
+
+
+def _render_pr_url_inputs():
     for i, _ in enumerate(st.session_state.pr_urls):
-        st.session_state.pr_urls[i] = st.text_input(
-            f"PR URL #{i + 1}",
-            value=st.session_state.pr_urls[i],
-            key=f"pr_url_{i}",
-            placeholder="https://github.com/org/repo/pull/123",
-        )
+        col_input, col_clear = st.columns([22, 1], gap="small")
+        with col_input:
+            st.session_state.pr_urls[i] = st.text_input(
+                f"PR URL #{i + 1}",
+                value=st.session_state.pr_urls[i],
+                key=f"pr_url_{i}",
+                placeholder="https://github.com/org/repo/pull/123",
+            )
+        with col_clear:
+            st.button(
+                "✕",
+                key=f"clear_pr_url_{i}",
+                help="Clear URL",
+                type="secondary",
+                use_container_width=True,
+                on_click=_clear_pr_url,
+                args=(i,),
+            )
 
+
+def _render_pr_url_controls():
     col_add, col_remove, _ = st.columns([2, 2, 4], gap="small")
     with col_add:
         if st.button("Add URL Line", use_container_width=True):
@@ -195,6 +228,199 @@ def render_analyse_tab():
             st.session_state.pr_urls.pop()
             st.rerun()
 
+
+def _get_validated_urls() -> list[str] | None:
+    urls = [u.strip() for u in st.session_state.pr_urls if u.strip()]
+    if not urls:
+        st.error("Please add at least one valid PR URL.")
+        return None
+
+    errors = [msg for url in urls if (msg := _validate_pr_url(url))]
+    if errors:
+        for error in errors:
+            st.error(error)
+        return None
+
+    return urls
+
+
+def _run_analysis(urls: list[str], push_log) -> tuple[int, int]:
+    settings = build_settings_for_run(urls)
+    settings.validate()
+
+    processor = PRProcessor(settings)
+    processed_count = 0
+    skipped_merged_count = 0
+
+    for url in urls:
+        is_merged, pr_title = _get_pr_merged_status(processor, url)
+        if is_merged:
+            skipped_merged_count += 1
+            skip_msg = f"Skipping merged PR: {pr_title} ({url})"
+            push_log(skip_msg)
+            st.info(skip_msg)
+            continue
+
+        push_log(f"Processing: {url}")
+        processor.process(url)
+        processed_count += 1
+
+    return processed_count, skipped_merged_count
+
+
+def _check_pr_statuses(urls: list[str]) -> dict[str, dict]:
+    settings = build_settings_for_run(urls)
+    if not settings.github_token:
+        raise ValueError("GITHUB_TOKEN is required to check PR status.")
+
+    processor = PRProcessor(settings)
+    statuses: dict[str, dict] = {}
+
+    for url in urls:
+        try:
+            is_merged, pr_title = _get_pr_merged_status(processor, url)
+            statuses[url] = {
+                "title": pr_title,
+                "state": "merged" if is_merged else "open",
+            }
+        except Exception as exc:
+            statuses[url] = {
+                "title": url,
+                "state": "error",
+                "error": str(exc),
+            }
+
+    return statuses
+
+
+def _render_pr_statuses():
+    statuses = st.session_state.pr_statuses
+    if not statuses:
+        return
+
+    st.caption("PR status preview")
+    for url, details in statuses.items():
+        title = html.escape(details.get("title", url))
+        safe_url = html.escape(url)
+        state = details.get("state")
+        if state == "merged":
+            st.markdown(
+                (
+                    "<div style='border:1px solid #8250df;background:#f5f0ff;color:#4c2889;"
+                    "padding:8px 10px;border-radius:8px;margin-bottom:6px;'>"
+                    "<strong style='margin-right:8px;'>MERGED</strong>"
+                    f"{title} | {safe_url}"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+        elif state == "open":
+            st.markdown(
+                (
+                    "<div style='border:1px solid #1a7f37;background:#dafbe1;color:#116329;"
+                    "padding:8px 10px;border-radius:8px;margin-bottom:6px;'>"
+                    "<strong style='margin-right:8px;'>OPEN</strong>"
+                    f"{title} | {safe_url}"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+        else:
+            error = html.escape(details.get("error", "Unknown error"))
+            st.markdown(
+                (
+                    "<div style='border:1px solid #cf222e;background:#ffebe9;color:#a40e26;"
+                    "padding:8px 10px;border-radius:8px;margin-bottom:6px;'>"
+                    "<strong style='margin-right:8px;'>ERROR</strong>"
+                    f"{title} | {safe_url} | {error}"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+
+
+def _auto_refresh_pr_statuses():
+    """Auto-check status for valid PR URLs currently present in the input fields."""
+    current_urls = [u.strip() for u in st.session_state.pr_urls if u.strip()]
+    valid_urls = [u for u in current_urls if _validate_pr_url(u) is None]
+
+    if not valid_urls:
+        st.session_state.pr_statuses = {}
+        return
+
+    valid_url_set = set(valid_urls)
+    st.session_state.pr_statuses = {
+        url: status
+        for url, status in st.session_state.pr_statuses.items()
+        if url in valid_url_set
+    }
+
+    missing_urls = [url for url in valid_urls if url not in st.session_state.pr_statuses]
+    if not missing_urls:
+        return
+
+    try:
+        new_statuses = _check_pr_statuses(missing_urls)
+    except Exception as exc:
+        err = str(exc)
+        new_statuses = {
+            url: {
+                "title": url,
+                "state": "error",
+                "error": err,
+            }
+            for url in missing_urls
+        }
+    st.session_state.pr_statuses.update(new_statuses)
+
+
+def _get_analyse_block_reason() -> str | None:
+    current_urls = [u.strip() for u in st.session_state.pr_urls if u.strip()]
+    if not current_urls:
+        return "Add at least one PR URL to enable Analyse."
+
+    if any(_validate_pr_url(url) for url in current_urls):
+        return "Fix invalid PR URL(s) to enable Analyse."
+
+    statuses = st.session_state.pr_statuses
+    if any(statuses.get(url, {}).get("state") == "merged" for url in current_urls):
+        return "One or more PRs are already merged. Remove them to enable Analyse."
+
+    if any(statuses.get(url, {}).get("state") == "error" for url in current_urls):
+        return "One or more PRs have status errors. Fix them to enable Analyse."
+
+    if any(url not in statuses for url in current_urls):
+        return "Waiting for PR status validation..."
+
+    return None
+
+
+def _render_analysis_summary(processed_count: int, skipped_merged_count: int, push_log):
+    if processed_count == 0:
+        push_log("No analysis generated: all provided PRs are already merged.")
+        st.warning("All provided PRs are already merged. No analysis was generated.")
+        return
+
+    push_log("Analysis finished successfully.")
+    success_msg = f"Review process completed for {processed_count} PR(s)."
+    if skipped_merged_count:
+        success_msg += f" Skipped {skipped_merged_count} merged PR(s)."
+    st.success(success_msg)
+
+
+def render_analyse_tab():
+    st.subheader("Analyse PRs")
+    st.caption("Add one PR URL per line and click Analyse.")
+
+    _render_pr_url_inputs()
+    _render_pr_url_controls()
+
+    _auto_refresh_pr_statuses()
+
+    _render_pr_statuses()
+
+    analyse_block_reason = _get_analyse_block_reason()
+
     logs_box = st.empty()
 
     def push_log(message: str):
@@ -202,16 +428,14 @@ def render_analyse_tab():
         lines = st.session_state.analysis_logs[-250:]
         logs_box.code("\n".join(lines), language="text")
 
-    if st.button("Analyse", type="primary"):
-        urls = [u.strip() for u in st.session_state.pr_urls if u.strip()]
-        if not urls:
-            st.error("Please add at least one valid PR URL.")
-            return
-
-        errors = [msg for url in urls if (msg := _validate_pr_url(url))]
-        if errors:
-            for e in errors:
-                st.error(e)
+    if st.button(
+        "Analyse",
+        type="primary",
+        disabled=bool(analyse_block_reason),
+        help=analyse_block_reason or "Run automated review for all valid OPEN PR URLs.",
+    ):
+        urls = _get_validated_urls()
+        if urls is None:
             return
 
         st.session_state.analysis_logs = []
@@ -225,17 +449,8 @@ def render_analyse_tab():
         root_logger.setLevel(logging.INFO)
 
         try:
-            settings = build_settings_for_run(urls)
-            settings.validate()
-
-            processor = PRProcessor(settings)
-
-            for url in urls:
-                push_log(f"Processing: {url}")
-                processor.process(url)
-
-            push_log("Analysis finished successfully.")
-            st.success("Review process completed.")
+            processed_count, skipped_merged_count = _run_analysis(urls, push_log)
+            _render_analysis_summary(processed_count, skipped_merged_count, push_log)
         except Exception as exc:
             push_log(f"ERROR: {exc}")
             st.error(f"Analysis failed: {exc}")
@@ -258,6 +473,28 @@ section.main > div.block-container {
     padding: 0.3rem 0.75rem;
     font-size: 0.88rem;
     border-radius: 0.45rem;
+}
+
+div[class*="st-key-clear_pr_url_"] button {
+    margin-top: 1.72rem;
+    width: 2.2rem;
+    min-width: 2.2rem;
+    height: 2.2rem;
+    min-height: 2.2rem;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid #30363d;
+    background: transparent;
+    color: #8b949e;
+    font-size: 0.95rem;
+    line-height: 1;
+    box-shadow: none;
+}
+
+div[class*="st-key-clear_pr_url_"] button:hover {
+    border-color: #484f58;
+    background: #161b22;
+    color: #c9d1d9;
 }
 
 @media (max-width: 640px) {

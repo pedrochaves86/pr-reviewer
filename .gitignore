@@ -7,3 +7,4 @@ pr_reviewer.log
 *.log
 # Streamlit local secrets (never commit — configure on Streamlit Cloud dashboard instead)
 .streamlit/secrets.toml
+.claude/settings.local.json
