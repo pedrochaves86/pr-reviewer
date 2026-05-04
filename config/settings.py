@@ -4,7 +4,6 @@ Configurações centrais — lidas de variáveis de ambiente ou ficheiro .env
 
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,25 +11,32 @@ load_dotenv()
 
 @dataclass
 class Settings:
-    # ── Entrada direta (opcional) ──────────────────────────────────────────
-    # Se definido, processa PR(s) diretamente sem ler Teams.
+    # ── Entrada direta (obrigatória) ───────────────────────────────────────
+    # Lista de PR URLs separados por vírgula.
     github_pr_url: str = field(default_factory=lambda: os.getenv("GITHUB_PR_URL", ""))
-
-    # ── Teams ──────────────────────────────────────────────────────────────
-    # Graph API (recomendado) OU Incoming Webhook para envio
-    teams_tenant_id: str = field(default_factory=lambda: os.getenv("TEAMS_TENANT_ID", ""))
-    teams_client_id: str = field(default_factory=lambda: os.getenv("TEAMS_CLIENT_ID", ""))
-    teams_client_secret: str = field(default_factory=lambda: os.getenv("TEAMS_CLIENT_SECRET", ""))
-    teams_team_id: str = field(default_factory=lambda: os.getenv("TEAMS_TEAM_ID", ""))
-    teams_channel_id: str = field(default_factory=lambda: os.getenv("TEAMS_CHANNEL_ID", ""))
 
     # ── GitHub ─────────────────────────────────────────────────────────────
     github_token: str = field(default_factory=lambda: os.getenv("GITHUB_TOKEN", ""))
     github_reviewer_login: str = field(default_factory=lambda: os.getenv("GITHUB_REVIEWER_LOGIN", ""))
 
-    # ── Anthropic (Claude) ─────────────────────────────────────────────────
-    anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
-    claude_model: str = field(default_factory=lambda: os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"))
+    # ── GitHub Models (via licença GitHub/Copilot) ────────────────────────
+    github_models_token: str = field(default_factory=lambda: os.getenv("GITHUB_MODELS_TOKEN", ""))
+    github_models_endpoint: str = field(
+        default_factory=lambda: (
+            os.getenv("GITHUB_MODELS_ENDPOINT", "")
+            or "https://models.inference.ai.azure.com/chat/completions"
+        )
+    )
+    github_models_catalog_endpoint: str = field(
+        default_factory=lambda: (
+            os.getenv("GITHUB_MODELS_CATALOG_ENDPOINT", "")
+            or "https://models.inference.ai.azure.com/models"
+        )
+    )
+    # Modelo validado no catálogo GitHub Models acessível no tenant EDP.
+    github_models_model: str = field(
+        default_factory=lambda: (os.getenv("GITHUB_MODELS_MODEL", "") or "gpt-4o")
+    )
 
     # ── SonarQube (opcional) ───────────────────────────────────────────────
     sonar_url: str = field(default_factory=lambda: os.getenv("SONAR_URL", ""))
@@ -42,40 +48,17 @@ class Settings:
     checkmarx_api_key: str = field(default_factory=lambda: os.getenv("CHECKMARX_API_KEY", ""))
 
     # ── Comportamento ──────────────────────────────────────────────────────
-    poll_interval_minutes: int = field(
-        default_factory=lambda: int(os.getenv("POLL_INTERVAL_MINUTES", "5"))
-    )
-    # Ficheiro para guardar PRs já processados (evita duplicados)
-    processed_prs_file: str = field(
-        default_factory=lambda: os.getenv("PROCESSED_PRS_FILE", "processed_prs.json")
-    )
-    # Idioma dos comentários de review
     review_language: str = field(
         default_factory=lambda: os.getenv("REVIEW_LANGUAGE", "pt")
     )
 
     def validate(self):
         required = {
+            "GITHUB_PR_URL": self.github_pr_url,
             "GITHUB_TOKEN": self.github_token,
             "GITHUB_REVIEWER_LOGIN": self.github_reviewer_login,
-            "ANTHROPIC_API_KEY": self.anthropic_api_key,
+            "GITHUB_MODELS_TOKEN|GITHUB_TOKEN": self.github_models_token or self.github_token,
         }
-
-        # Em modo direto (GITHUB_PR_URL definido), Teams é opcional.
-        if not (self.github_pr_url or "").strip():
-            required.update(
-                {
-                    "TEAMS_TENANT_ID": self.teams_tenant_id,
-                    "TEAMS_CLIENT_ID": self.teams_client_id,
-                    "TEAMS_CLIENT_SECRET": self.teams_client_secret,
-                    "TEAMS_CHANNEL_ID": self.teams_channel_id,
-                }
-            )
-
-            channel_value = (self.teams_channel_id or "").strip()
-            is_chat_mode = "@thread.v2" in channel_value or "/l/chat/" in channel_value
-            if not is_chat_mode:
-                required["TEAMS_TEAM_ID"] = self.teams_team_id
 
         missing = [k for k, v in required.items() if not v]
         if missing:

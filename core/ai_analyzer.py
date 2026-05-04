@@ -1,5 +1,5 @@
 """
-Analisador de código via Claude (Anthropic API).
+Analisador de código via GitHub Models.
 Recebe diff + metadados e devolve uma review estruturada.
 """
 
@@ -8,8 +8,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Optional
-import anthropic
-from anthropic import APIStatusError, APIConnectionError, AuthenticationError, RateLimitError
+import requests
 
 from config.settings import Settings
 
@@ -62,12 +61,123 @@ Regras:
 - Não inventes problemas fora do diff fornecido
 """
 
-
 class AIAnalyzer:
     def __init__(self, settings: Settings):
-        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        self.model = settings.claude_model
+        self._token = settings.github_models_token or settings.github_token
+        self._endpoint = settings.github_models_endpoint
+        self._catalog_endpoint = settings.github_models_catalog_endpoint
+        self.model = settings.github_models_model
+        self._validated_model: str | None = None
         self.language = settings.review_language
+
+    def _resolve_validated_model(self) -> str:
+        if self._validated_model:
+            return self._validated_model
+
+        target_model = self.model
+        try:
+            resp = requests.get(
+                self._catalog_endpoint,
+                headers={"Authorization": f"Bearer {self._token}"},
+                timeout=20,
+            )
+            if resp.status_code in (401, 403):
+                log.warning("Sem permissões para validar catálogo de modelos; a usar modelo configurado sem validação.")
+                self._validated_model = target_model
+                return self._validated_model
+
+            resp.raise_for_status()
+            payload = resp.json()
+            raw_models = payload.get("data") if isinstance(payload, dict) else payload
+            model_ids = []
+            if isinstance(raw_models, list):
+                for item in raw_models:
+                    if isinstance(item, dict) and item.get("id"):
+                        model_ids.append(str(item["id"]))
+                    elif isinstance(item, str):
+                        model_ids.append(item)
+
+            if target_model in model_ids:
+                self._validated_model = target_model
+                return self._validated_model
+
+            normalized_target = target_model.strip().lower()
+            suffix_matches = [
+                model_id for model_id in model_ids
+                if f"/models/{normalized_target}/" in model_id.lower()
+            ]
+            if suffix_matches:
+                # Mantém a versão mais recente quando o catálogo devolve múltiplas versões.
+                self._validated_model = max(suffix_matches)
+                log.info(
+                    f"Modelo '{target_model}' validado no catálogo como '{self._validated_model}'."
+                )
+                return self._validated_model
+
+            log.warning(
+                f"Modelo '{target_model}' não encontrado no catálogo acessível. A usar valor configurado diretamente."
+            )
+        except requests.RequestException as exc:
+            log.warning(f"Falha ao validar catálogo de modelos: {exc}")
+
+        self._validated_model = target_model
+        return self._validated_model
+
+    def _call_github_models(self, user_msg: str) -> str:
+        if not self._token:
+            raise RuntimeError(
+                "GITHUB_MODELS_TOKEN (ou GITHUB_TOKEN) não definido para chamar GitHub Models."
+            )
+
+        model = self._resolve_validated_model()
+
+        payload = {
+            "model": model,
+            "max_tokens": 4096,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+        }
+
+        log.info(f"A usar GitHub Models (modelo: {model})...")
+        resp = requests.post(
+            self._endpoint,
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=120,
+        )
+
+        if resp.status_code in (401, 403):
+            raise RuntimeError(
+                "GitHub Models não autorizado para este token. "
+                "Usa um token com acesso ao catálogo/model inference no GitHub Enterprise da EDP."
+            )
+        if resp.status_code == 429:
+            raise RuntimeError("GitHub Models rate limit atingido. Tenta novamente dentro de alguns minutos.")
+        if resp.status_code == 400:
+            details = ""
+            try:
+                details = resp.json().get("error", {}).get("message", "")
+            except Exception:
+                details = ""
+            raise RuntimeError(f"Pedido inválido para GitHub Models: {details or 'HTTP 400'}")
+
+        resp.raise_for_status()
+        data = resp.json()
+        message_content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content"))
+
+        if isinstance(message_content, str):
+            return message_content
+
+        if isinstance(message_content, list):
+            chunks = [item.get("text", "") for item in message_content if isinstance(item, dict)]
+            return "\n".join(part for part in chunks if part).strip()
+
+        raise RuntimeError("Resposta inesperada do GitHub Models: campo choices[0].message.content ausente.")
 
     @staticmethod
     def _changed_lines(diff: str) -> dict[str, set[int]]:
@@ -167,36 +277,8 @@ class AIAnalyzer:
 
         user_msg = self._build_prompt(pr_info, diff_truncated, sonar_findings, checkmarx_findings)
 
-        log.info(f"A enviar diff para Claude ({len(diff_truncated)} chars)...")
-        try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=4096,
-                system=[{
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }],
-                messages=[{"role": "user", "content": user_msg}],
-            )
-        except AuthenticationError:
-            log.error("Anthropic API key inválida ou sem permissões.")
-            raise
-        except RateLimitError as e:
-            log.warning(f"Rate limit Anthropic atingido: {e}")
-            raise
-        except APIConnectionError as e:
-            log.error(f"Erro de ligação à API Anthropic: {e}")
-            raise
-        except APIStatusError as e:
-            log.error(f"Erro da API Anthropic ({e.status_code}): {e.message}")
-            raise
-
-        cache_read = getattr(response.usage, "cache_read_input_tokens", 0)
-        if cache_read:
-            log.debug(f"Prompt cache hit: {cache_read} tokens lidos da cache.")
-
-        raw_text = response.content[0].text.strip()
+        log.info(f"A enviar diff para GitHub Models ({len(diff_truncated)} chars)...")
+        raw_text = self._call_github_models(user_msg).strip()
         # Extrai JSON de dentro de um bloco markdown, se presente
         md_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_text)
         if md_match:
@@ -205,7 +287,7 @@ class AIAnalyzer:
         try:
             data = json.loads(raw_text)
         except json.JSONDecodeError as e:
-            log.error(f"Resposta Claude não é JSON válido: {e}\n{raw_text[:500]}")
+            log.error(f"Resposta do modelo não é JSON válido: {e}\n{raw_text[:500]}")
             # Fallback seguro
             data = {
                 "summary": "Erro ao analisar resposta da IA.",

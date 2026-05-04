@@ -1,6 +1,6 @@
 """
 Orquestrador principal — liga todas as peças:
-Teams → GitHub → Sonar/Checkmarx → Claude → Review
+GitHub → Sonar/Checkmarx → GitHub Models → Review
 """
 
 import logging
@@ -8,7 +8,6 @@ from config.settings import Settings
 from core.github_client import GitHubClient
 from core.ai_analyzer import AIAnalyzer
 from core.review_formatter import format_review_body
-from core.teams_monitor import TeamsMonitor
 from integrations.sonar_client import SonarClient
 from integrations.checkmarx_client import CheckmarxClient
 
@@ -22,11 +21,6 @@ class PRProcessor:
         self.analyzer = AIAnalyzer(settings)
         self.sonar = SonarClient(settings)
         self.checkmarx = CheckmarxClient(settings)
-        # TeamsMonitor partilhado para marcar PRs como processados
-        self._monitor: TeamsMonitor | None = None
-
-    def set_monitor(self, monitor: TeamsMonitor):
-        self._monitor = monitor
 
     def process(self, pr_url: str):
         """Pipeline completo para um URL de PR."""
@@ -68,8 +62,8 @@ class PRProcessor:
             log.info("🛡️  A consultar Checkmarx...")
             cx_findings = self.checkmarx.get_latest_scan_results(repo)
 
-        # 6. Análise Claude
-        log.info("🤖 A analisar código com Claude...")
+        # 6. Análise GitHub Models
+        log.info("🤖 A analisar código com GitHub Models...")
         result = self.analyzer.analyze(
             pr_info=pr_info,
             diff=diff,
@@ -118,10 +112,6 @@ class PRProcessor:
             body=review_body,
             head_sha=head_sha,
         )
-
-        # 9. Marca como processado
-        if self._monitor:
-            self._monitor.mark_processed(pr_url)
 
         log.info(f"✅ PR #{pr_number} processado com sucesso.")
         return result

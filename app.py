@@ -3,6 +3,7 @@ import os
 import re
 import html
 
+import requests
 import streamlit as st
 from dotenv import dotenv_values, load_dotenv, set_key
 
@@ -27,18 +28,30 @@ ENV_SECTIONS = {
             "help": "1) Open your GitHub profile\n2) Copy your username/login\n3) Use the same login that owns the token",
         },
     ],
-    "Anthropic": [
+    "GitHub Models": [
         {
-            "key": "ANTHROPIC_API_KEY",
-            "label": "Anthropic API Key",
+            "key": "GITHUB_MODELS_TOKEN",
+            "label": "GitHub Models Token (optional)",
             "secret": True,
-            "help": "1) Open https://console.anthropic.com/keys\n2) Generate a new API key\n3) Paste it here",
+            "help": "Optional. If empty, the app will reuse GITHUB_TOKEN for model inference.",
         },
         {
-            "key": "CLAUDE_MODEL",
-            "label": "Claude Model",
+            "key": "GITHUB_MODELS_MODEL",
+            "label": "GitHub Models Model",
             "secret": False,
-            "help": "Use a model available in your account, for example claude-sonnet-4-6 (default)",
+            "help": "Use a model available in your GitHub Enterprise tenant, for example gpt-4o.",
+        },
+        {
+            "key": "GITHUB_MODELS_ENDPOINT",
+            "label": "GitHub Models Endpoint",
+            "secret": False,
+            "help": "Default: https://models.inference.ai.azure.com/chat/completions",
+        },
+        {
+            "key": "GITHUB_MODELS_CATALOG_ENDPOINT",
+            "label": "GitHub Models Catalog Endpoint",
+            "secret": False,
+            "help": "Default: https://models.inference.ai.azure.com/models",
         },
     ],
 }
@@ -108,15 +121,52 @@ def ensure_state():
 
 
 _GITHUB_PR_RE = re.compile(
-    r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/pull/\d+$"
+    r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/pull/\d+/?(?:[?#].*)?$"
 )
 
 
 def _validate_pr_url(url: str) -> str | None:
     """Return None if valid, or an error message string if invalid."""
     if not _GITHUB_PR_RE.match(url):
-        return f"Invalid PR URL: '{url}'. Must match https://github.com/<org>/<repo>/pull/<number>"
+        return (
+            f"Invalid PR URL: '{url}'. Must match "
+            "https://github.com/<org>/<repo>/pull/<number>"
+        )
     return None
+
+
+def _format_user_error(exc: Exception) -> str:
+    """Map technical exceptions to actionable user-facing messages."""
+    github_error = _format_github_http_error(exc)
+    if github_error:
+        return github_error
+
+    return str(exc)
+
+
+def _format_github_http_error(exc: Exception) -> str | None:
+    if not isinstance(exc, requests.HTTPError):
+        return None
+
+    response = exc.response
+    status = response.status_code if response is not None else None
+    host = ""
+    if response is not None and response.request is not None:
+        host = response.request.url or ""
+
+    if "api.github.com" not in host:
+        return None
+
+    if status in (401, 403):
+        return (
+            "GitHub authentication/permissions failed. "
+            "Check GITHUB_TOKEN and ensure it has repo/pull_requests access."
+        )
+    if status == 404:
+        return "PR not found or you do not have access to this repository."
+    if status == 429:
+        return "GitHub API rate limit reached. Please try again in a few minutes."
+    return f"GitHub API error (HTTP {status})."
 
 
 def render_settings_tab():
@@ -287,7 +337,7 @@ def _check_pr_statuses(urls: list[str]) -> dict[str, dict]:
             statuses[url] = {
                 "title": url,
                 "state": "error",
-                "error": str(exc),
+                "error": _format_user_error(exc),
             }
 
     return statuses
@@ -362,7 +412,7 @@ def _auto_refresh_pr_statuses():
     try:
         new_statuses = _check_pr_statuses(missing_urls)
     except Exception as exc:
-        err = str(exc)
+        err = _format_user_error(exc)
         new_statuses = {
             url: {
                 "title": url,
@@ -452,8 +502,9 @@ def render_analyse_tab():
             processed_count, skipped_merged_count = _run_analysis(urls, push_log)
             _render_analysis_summary(processed_count, skipped_merged_count, push_log)
         except Exception as exc:
-            push_log(f"ERROR: {exc}")
-            st.error(f"Analysis failed: {exc}")
+            friendly_error = _format_user_error(exc)
+            push_log(f"ERROR: {friendly_error}")
+            st.error(f"Analysis failed: {friendly_error}")
         finally:
             root_logger.removeHandler(log_handler)
 
@@ -508,7 +559,7 @@ div[class*="st-key-clear_pr_url_"] button:hover {
     unsafe_allow_html=True,
 )
 st.title("🤖 " + APP_TITLE)
-st.caption("Analyse GitHub Pull Requests automatically using Claude AI.")
+st.caption("Analyse GitHub Pull Requests automatically using GitHub Models (Copilot/EDP).")
 
 ensure_state()
 
