@@ -152,10 +152,7 @@ class AIAnalyzer:
         )
 
         if resp.status_code in (401, 403):
-            raise RuntimeError(
-                "GitHub Models não autorizado para este token. "
-                "Usa um token com acesso ao catálogo/model inference no GitHub Enterprise da EDP."
-            )
+            raise self._build_models_auth_error(resp)
         if resp.status_code == 429:
             raise RuntimeError("GitHub Models rate limit atingido. Tenta novamente dentro de alguns minutos.")
         if resp.status_code == 400:
@@ -178,6 +175,30 @@ class AIAnalyzer:
             return "\n".join(part for part in chunks if part).strip()
 
         raise RuntimeError("Resposta inesperada do GitHub Models: campo choices[0].message.content ausente.")
+
+    @staticmethod
+    def _build_models_auth_error(resp: requests.Response) -> RuntimeError:
+        details = ""
+        try:
+            err = resp.json().get("error", {})
+            details = (err.get("details") or err.get("message") or "").strip()
+        except Exception:
+            details = ""
+
+        lower_details = details.lower()
+        if "models is disabled" in lower_details or "github models is disabled" in lower_details:
+            return RuntimeError(
+                "GitHub Models está desativado no tenant GitHub Enterprise. "
+                "Pede ao administrador da EDP para ativar GitHub Models para a organização/enterprise."
+            )
+
+        if details:
+            return RuntimeError(f"GitHub Models não autorizado (HTTP {resp.status_code}): {details}")
+
+        return RuntimeError(
+            "GitHub Models não autorizado para este token. "
+            "Usa um token com acesso a model inference no GitHub Enterprise da EDP."
+        )
 
     @staticmethod
     def _changed_lines(diff: str) -> dict[str, set[int]]:

@@ -135,6 +135,10 @@ def _validate_pr_url(url: str) -> str | None:
     return None
 
 
+def _get_invalid_url_messages(urls: list[str]) -> list[str]:
+    return [msg for url in urls if (msg := _validate_pr_url(url))]
+
+
 def _format_user_error(exc: Exception) -> str:
     """Map technical exceptions to actionable user-facing messages."""
     github_error = _format_github_http_error(exc)
@@ -227,13 +231,25 @@ def build_settings_for_run(pr_urls: list[str]) -> Settings:
     return settings
 
 
-def _get_pr_merged_status(processor: PRProcessor, pr_url: str) -> tuple[bool, str]:
-    """Return whether the PR is already merged plus a display title."""
+def _get_pr_status(processor: PRProcessor, pr_url: str) -> tuple[str, str]:
+    """Return PR lifecycle status and title.
+
+    Status values:
+      - open
+      - merged
+      - closed
+    """
     owner, repo, pr_number = processor.github.parse_pr_url(pr_url)
     pr_info = processor.github.get_pr_info(owner, repo, pr_number)
     title = pr_info.get("title", f"PR #{pr_number}")
     is_merged = bool(pr_info.get("merged")) or bool(pr_info.get("merged_at"))
-    return is_merged, title
+    state = (pr_info.get("state") or "").lower()
+
+    if is_merged:
+        return "merged", title
+    if state == "open":
+        return "open", title
+    return "closed", title
 
 
 def _clear_pr_url(index: int):
@@ -285,7 +301,7 @@ def _get_validated_urls() -> list[str] | None:
         st.error("Please add at least one valid PR URL.")
         return None
 
-    errors = [msg for url in urls if (msg := _validate_pr_url(url))]
+    errors = _get_invalid_url_messages(urls)
     if errors:
         for error in errors:
             st.error(error)
@@ -300,13 +316,13 @@ def _run_analysis(urls: list[str], push_log) -> tuple[int, int]:
 
     processor = PRProcessor(settings)
     processed_count = 0
-    skipped_merged_count = 0
+    skipped_non_open_count = 0
 
     for url in urls:
-        is_merged, pr_title = _get_pr_merged_status(processor, url)
-        if is_merged:
-            skipped_merged_count += 1
-            skip_msg = f"Skipping merged PR: {pr_title} ({url})"
+        pr_state, pr_title = _get_pr_status(processor, url)
+        if pr_state != "open":
+            skipped_non_open_count += 1
+            skip_msg = f"Skipping {pr_state} PR: {pr_title} ({url})"
             push_log(skip_msg)
             st.info(skip_msg)
             continue
@@ -315,7 +331,7 @@ def _run_analysis(urls: list[str], push_log) -> tuple[int, int]:
         processor.process(url)
         processed_count += 1
 
-    return processed_count, skipped_merged_count
+    return processed_count, skipped_non_open_count
 
 
 def _check_pr_statuses(urls: list[str]) -> dict[str, dict]:
@@ -328,10 +344,10 @@ def _check_pr_statuses(urls: list[str]) -> dict[str, dict]:
 
     for url in urls:
         try:
-            is_merged, pr_title = _get_pr_merged_status(processor, url)
+            pr_state, pr_title = _get_pr_status(processor, url)
             statuses[url] = {
                 "title": pr_title,
-                "state": "merged" if is_merged else "open",
+                "state": pr_state,
             }
         except Exception as exc:
             statuses[url] = {
@@ -370,6 +386,17 @@ def _render_pr_statuses():
                     "<div style='border:1px solid #1a7f37;background:#dafbe1;color:#116329;"
                     "padding:8px 10px;border-radius:8px;margin-bottom:6px;'>"
                     "<strong style='margin-right:8px;'>OPEN</strong>"
+                    f"{title} | {safe_url}"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+        elif state == "closed":
+            st.markdown(
+                (
+                    "<div style='border:1px solid #9a6700;background:#fff8c5;color:#7d4e00;"
+                    "padding:8px 10px;border-radius:8px;margin-bottom:6px;'>"
+                    "<strong style='margin-right:8px;'>CLOSED</strong>"
                     f"{title} | {safe_url}"
                     "</div>"
                 ),
@@ -429,12 +456,16 @@ def _get_analyse_block_reason() -> str | None:
     if not current_urls:
         return "Add at least one PR URL to enable Analyse."
 
-    if any(_validate_pr_url(url) for url in current_urls):
-        return "Fix invalid PR URL(s) to enable Analyse."
+    invalid_errors = _get_invalid_url_messages(current_urls)
+    if invalid_errors:
+        return invalid_errors[0]
 
     statuses = st.session_state.pr_statuses
     if any(statuses.get(url, {}).get("state") == "merged" for url in current_urls):
         return "One or more PRs are already merged. Remove them to enable Analyse."
+
+    if any(statuses.get(url, {}).get("state") == "closed" for url in current_urls):
+        return "One or more PRs are closed (not merged). Remove them to enable Analyse."
 
     if any(statuses.get(url, {}).get("state") == "error" for url in current_urls):
         return "One or more PRs have status errors. Fix them to enable Analyse."
@@ -464,6 +495,10 @@ def render_analyse_tab():
 
     _render_pr_url_inputs()
     _render_pr_url_controls()
+
+    current_urls = [u.strip() for u in st.session_state.pr_urls if u.strip()]
+    for error in _get_invalid_url_messages(current_urls):
+        st.error(error)
 
     _auto_refresh_pr_statuses()
 
