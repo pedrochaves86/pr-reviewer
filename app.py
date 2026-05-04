@@ -5,7 +5,6 @@ import html
 
 import requests
 import streamlit as st
-from anthropic import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 from dotenv import dotenv_values, load_dotenv, set_key
 
 from config.settings import Settings
@@ -29,26 +28,30 @@ ENV_SECTIONS = {
             "help": "1) Open your GitHub profile\n2) Copy your username/login\n3) Use the same login that owns the token",
         },
     ],
-    "Anthropic": [
+    "GitHub Models": [
         {
-            "key": "ANTHROPIC_API_KEY",
-            "label": "Anthropic API Key",
+            "key": "GITHUB_MODELS_TOKEN",
+            "label": "GitHub Models Token (optional)",
             "secret": True,
-            "help": "1) Open https://console.anthropic.com/keys\n2) Generate a new API key\n3) Paste it here",
+            "help": "Optional. If empty, the app will reuse GITHUB_TOKEN for model inference.",
         },
         {
-            "key": "CLAUDE_MODEL",
-            "label": "Claude Model",
+            "key": "GITHUB_MODELS_MODEL",
+            "label": "GitHub Models Model",
             "secret": False,
-            "help": "Use a model available in your account, for example claude-sonnet-4-6 (default)",
+            "help": "Use a model available in your GitHub Enterprise tenant, for example gpt-4o.",
         },
-    ],
-    "OpenAI (fallback)": [
         {
-            "key": "OPENAI_API_KEY",
-            "label": "OpenAI API Key",
-            "secret": True,
-            "help": "Optional fallback when Anthropic has no credits.\n1) Open https://platform.openai.com/api-keys\n2) Generate a new API key\n3) Paste it here",
+            "key": "GITHUB_MODELS_ENDPOINT",
+            "label": "GitHub Models Endpoint",
+            "secret": False,
+            "help": "Default: https://models.inference.ai.azure.com/chat/completions",
+        },
+        {
+            "key": "GITHUB_MODELS_CATALOG_ENDPOINT",
+            "label": "GitHub Models Catalog Endpoint",
+            "secret": False,
+            "help": "Default: https://models.inference.ai.azure.com/models",
         },
     ],
 }
@@ -134,59 +137,11 @@ def _validate_pr_url(url: str) -> str | None:
 
 def _format_user_error(exc: Exception) -> str:
     """Map technical exceptions to actionable user-facing messages."""
-    anthropic_error = _format_anthropic_error(exc)
-    if anthropic_error:
-        return anthropic_error
-
     github_error = _format_github_http_error(exc)
     if github_error:
         return github_error
 
     return str(exc)
-
-
-def _format_anthropic_error(exc: Exception) -> str | None:
-    if isinstance(exc, AuthenticationError):
-        return "Anthropic authentication failed. Check ANTHROPIC_API_KEY."
-    if isinstance(exc, RateLimitError):
-        return (
-            "Anthropic usage limit reached for the selected model. "
-            "Try again later or switch to a model available in your plan."
-        )
-    if isinstance(exc, APIConnectionError):
-        return "Could not connect to Anthropic API. Check your network and try again."
-    if isinstance(exc, APIStatusError):
-        return _format_anthropic_status_error(exc)
-    return None
-
-
-def _format_anthropic_status_error(exc: APIStatusError) -> str:
-    status = getattr(exc, "status_code", None)
-    if status == 429:
-        return (
-            "Anthropic rate limit/quota reached. "
-            "Wait a bit and retry, or use a model with available quota."
-        )
-    if status == 401:
-        return "Anthropic authentication failed. Check ANTHROPIC_API_KEY."
-    if status == 400:
-        return _format_anthropic_bad_request(exc)
-    return f"Anthropic API error (HTTP {status})."
-
-
-def _format_anthropic_bad_request(exc: APIStatusError) -> str:
-    raw_msg = ""
-    try:
-        raw_msg = exc.body.get("error", {}).get("message", "") if isinstance(exc.body, dict) else str(exc.body)
-    except Exception:
-        pass
-    if "credit" in raw_msg.lower() or "balance" in raw_msg.lower():
-        return (
-            "Saldo de créditos Anthropic insuficiente. "
-            "Opções: recarrega em https://console.anthropic.com/settings/billing "
-            "ou define OPENAI_API_KEY no .env como fallback (https://platform.openai.com/api-keys)."
-        )
-    return f"Anthropic: {raw_msg}" if raw_msg else "Anthropic API error (HTTP 400)."
 
 
 def _format_github_http_error(exc: Exception) -> str | None:
@@ -604,7 +559,7 @@ div[class*="st-key-clear_pr_url_"] button:hover {
     unsafe_allow_html=True,
 )
 st.title("🤖 " + APP_TITLE)
-st.caption("Analyse GitHub Pull Requests automatically using Claude AI.")
+st.caption("Analyse GitHub Pull Requests automatically using GitHub Models (Copilot/EDP).")
 
 ensure_state()
 
