@@ -186,7 +186,10 @@ def render_settings_tab():
                         help=spec["help"],
                         key=f"input_{key}",
                     )
-                st.session_state.env_values[key] = value.strip()
+                # Não sobrescrever campos secret com string vazia (Streamlit não
+                # devolve o valor actual de campos password na primeira renderização)
+                if value.strip() or not spec["secret"]:
+                    st.session_state.env_values[key] = value.strip()
 
     col_save, col_reload, _ = st.columns([2, 2, 4], gap="small")
     with col_save:
