@@ -28,30 +28,12 @@ ENV_SECTIONS = {
             "help": "1) Open your GitHub profile\n2) Copy your username/login\n3) Use the same login that owns the token",
         },
     ],
-    "GitHub Models": [
+    "GitHub Copilot": [
         {
-            "key": "GITHUB_MODELS_TOKEN",
-            "label": "GitHub Models Token (optional)",
-            "secret": True,
-            "help": "Optional. If empty, the app will reuse GITHUB_TOKEN for model inference.",
-        },
-        {
-            "key": "GITHUB_MODELS_MODEL",
-            "label": "GitHub Models Model",
+            "key": "COPILOT_MODEL",
+            "label": "Copilot Model",
             "secret": False,
-            "help": "Use a model available in your GitHub Enterprise tenant, for example gpt-4o.",
-        },
-        {
-            "key": "GITHUB_MODELS_ENDPOINT",
-            "label": "GitHub Models Endpoint",
-            "secret": False,
-            "help": "Default: https://models.inference.ai.azure.com/chat/completions",
-        },
-        {
-            "key": "GITHUB_MODELS_CATALOG_ENDPOINT",
-            "label": "GitHub Models Catalog Endpoint",
-            "secret": False,
-            "help": "Default: https://models.inference.ai.azure.com/models",
+            "help": "Modelo a usar na GitHub Copilot API. Exemplos: gpt-4o, gpt-4o-mini, claude-3.5-sonnet.",
         },
     ],
 }

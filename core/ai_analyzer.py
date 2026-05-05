@@ -1,20 +1,26 @@
 """
-Analisador de código via GitHub Models.
+Analisador de código via GitHub Copilot API.
 Recebe diff + metadados e devolve uma review estruturada.
 """
 
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Optional
+
 import requests
+from openai import OpenAI, AuthenticationError, PermissionDeniedError
 
 from config.settings import Settings
 
 log = logging.getLogger(__name__)
 
-MAX_DIFF_CHARS = 20_000  # ~5k tokens — mantém dentro do limite de 10k tokens/min do plano free
+MAX_DIFF_CHARS = 20_000  # ~5k tokens
+
+COPILOT_API_BASE = "https://api.githubcopilot.com"
+COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
 
 
 @dataclass
@@ -63,142 +69,75 @@ Regras:
 
 class AIAnalyzer:
     def __init__(self, settings: Settings):
-        self._token = settings.github_models_token or settings.github_token
-        self._endpoint = settings.github_models_endpoint
-        self._catalog_endpoint = settings.github_models_catalog_endpoint
-        self.model = settings.github_models_model
-        self._validated_model: str | None = None
+        self.model = settings.copilot_model
         self.language = settings.review_language
-
-    def _resolve_validated_model(self) -> str:
-        if self._validated_model:
-            return self._validated_model
-
-        target_model = self.model
-        try:
-            resp = requests.get(
-                self._catalog_endpoint,
-                headers={"Authorization": f"Bearer {self._token}"},
-                timeout=20,
+        if not settings.github_token:
+            raise EnvironmentError(
+                "GITHUB_TOKEN não configurado. "
+                "É necessário para autenticar na GitHub Copilot API."
             )
-            if resp.status_code in (401, 403):
-                log.warning("Sem permissões para validar catálogo de modelos; a usar modelo configurado sem validação.")
-                self._validated_model = target_model
-                return self._validated_model
+        self._github_token = settings.github_token
+        self._copilot_token: str | None = None
+        self._copilot_token_expires_at: float = 0.0
 
-            resp.raise_for_status()
-            payload = resp.json()
-            raw_models = payload.get("data") if isinstance(payload, dict) else payload
-            model_ids = []
-            if isinstance(raw_models, list):
-                for item in raw_models:
-                    if isinstance(item, dict) and item.get("id"):
-                        model_ids.append(str(item["id"]))
-                    elif isinstance(item, str):
-                        model_ids.append(item)
+    def _get_copilot_token(self) -> str:
+        """Troca o GitHub PAT por um token de curta duração da Copilot API."""
+        now = time.time()
+        if self._copilot_token and now < self._copilot_token_expires_at - 60:
+            return self._copilot_token
 
-            if target_model in model_ids:
-                self._validated_model = target_model
-                return self._validated_model
-
-            normalized_target = target_model.strip().lower()
-            suffix_matches = [
-                model_id for model_id in model_ids
-                if f"/models/{normalized_target}/" in model_id.lower()
-            ]
-            if suffix_matches:
-                # Mantém a versão mais recente quando o catálogo devolve múltiplas versões.
-                self._validated_model = max(suffix_matches)
-                log.info(
-                    f"Modelo '{target_model}' validado no catálogo como '{self._validated_model}'."
-                )
-                return self._validated_model
-
-            log.warning(
-                f"Modelo '{target_model}' não encontrado no catálogo acessível. A usar valor configurado diretamente."
-            )
-        except requests.RequestException as exc:
-            log.warning(f"Falha ao validar catálogo de modelos: {exc}")
-
-        self._validated_model = target_model
-        return self._validated_model
-
-    def _call_github_models(self, user_msg: str) -> str:
-        if not self._token:
-            raise RuntimeError(
-                "GITHUB_MODELS_TOKEN (ou GITHUB_TOKEN) não definido para chamar GitHub Models."
-            )
-
-        model = self._resolve_validated_model()
-
-        payload = {
-            "model": model,
-            "max_tokens": 4096,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-        }
-
-        log.info(f"A usar GitHub Models (modelo: {model})...")
         resp = requests.post(
-            self._endpoint,
+            COPILOT_TOKEN_URL,
             headers={
-                "Authorization": f"Bearer {self._token}",
-                "Content-Type": "application/json",
+                "Authorization": f"token {self._github_token}",
+                "Accept": "application/json",
+                "Editor-Version": "vscode/1.99.0",
+                "Editor-Plugin-Version": "copilot/1.155.0",
+                "User-Agent": "GithubCopilot/1.155.0",
             },
-            json=payload,
-            timeout=120,
+            timeout=15,
         )
-
-        if resp.status_code in (401, 403):
-            raise self._build_models_auth_error(resp)
-        if resp.status_code == 429:
-            raise RuntimeError("GitHub Models rate limit atingido. Tenta novamente dentro de alguns minutos.")
-        if resp.status_code == 400:
-            details = ""
-            try:
-                details = resp.json().get("error", {}).get("message", "")
-            except Exception:
-                details = ""
-            raise RuntimeError(f"Pedido inválido para GitHub Models: {details or 'HTTP 400'}")
-
-        resp.raise_for_status()
-        data = resp.json()
-        message_content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content"))
-
-        if isinstance(message_content, str):
-            return message_content
-
-        if isinstance(message_content, list):
-            chunks = [item.get("text", "") for item in message_content if isinstance(item, dict)]
-            return "\n".join(part for part in chunks if part).strip()
-
-        raise RuntimeError("Resposta inesperada do GitHub Models: campo choices[0].message.content ausente.")
-
-    @staticmethod
-    def _build_models_auth_error(resp: requests.Response) -> RuntimeError:
-        details = ""
-        try:
-            err = resp.json().get("error", {})
-            details = (err.get("details") or err.get("message") or "").strip()
-        except Exception:
-            details = ""
-
-        lower_details = details.lower()
-        if "models is disabled" in lower_details or "github models is disabled" in lower_details:
-            return RuntimeError(
-                "GitHub Models está desativado no tenant GitHub Enterprise. "
-                "Pede ao administrador da EDP para ativar GitHub Models para a organização/enterprise."
+        if resp.status_code == 401:
+            raise RuntimeError(
+                "GITHUB_TOKEN inválido ou expirado. Verifica o token no ficheiro .env."
             )
+        if resp.status_code == 403:
+            raise RuntimeError(
+                "A conta não tem acesso ao GitHub Copilot. "
+                "Confirma que tens uma subscrição Copilot ativa em https://github.com/settings/copilot"
+            )
+        resp.raise_for_status()
 
-        if details:
-            return RuntimeError(f"GitHub Models não autorizado (HTTP {resp.status_code}): {details}")
+        data = resp.json()
+        self._copilot_token = data["token"]
+        self._copilot_token_expires_at = data.get("expires_at", now + 1800)
+        log.debug("Copilot token obtido com sucesso.")
+        return self._copilot_token
 
-        return RuntimeError(
-            "GitHub Models não autorizado para este token. "
-            "Usa um token com acesso a model inference no GitHub Enterprise da EDP."
-        )
+    def _call_copilot(self, user_msg: str) -> str:
+        log.info(f"A enviar diff para GitHub Copilot API (modelo: {self.model})...")
+        copilot_token = self._get_copilot_token()
+        client = OpenAI(base_url=COPILOT_API_BASE, api_key=copilot_token)
+        try:
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_tokens=4096,
+            )
+        except AuthenticationError as exc:
+            raise RuntimeError(
+                "Token Copilot inválido. Tenta novamente — o token de sessão pode ter expirado."
+            ) from exc
+        except PermissionDeniedError as exc:
+            raise RuntimeError(
+                "A conta não tem acesso ao GitHub Copilot. "
+                "Confirma que tens uma subscrição Copilot ativa."
+            ) from exc
+
+        return response.choices[0].message.content or ""
 
     @staticmethod
     def _changed_lines(diff: str) -> dict[str, set[int]]:
@@ -298,8 +237,7 @@ class AIAnalyzer:
 
         user_msg = self._build_prompt(pr_info, diff_truncated, sonar_findings, checkmarx_findings)
 
-        log.info(f"A enviar diff para GitHub Models ({len(diff_truncated)} chars)...")
-        raw_text = self._call_github_models(user_msg).strip()
+        raw_text = self._call_copilot(user_msg).strip()
         # Extrai JSON de dentro de um bloco markdown, se presente
         md_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_text)
         if md_match:
