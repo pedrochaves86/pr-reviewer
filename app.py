@@ -28,12 +28,18 @@ ENV_SECTIONS = {
             "help": "1) Open your GitHub profile\n2) Copy your username/login\n3) Use the same login that owns the token",
         },
     ],
-    "GitHub Copilot": [
+    "GitHub Models": [
         {
-            "key": "COPILOT_MODEL",
-            "label": "Copilot Model",
+            "key": "GITHUB_MODELS_MODEL",
+            "label": "GitHub Models Model",
             "secret": False,
-            "help": "Modelo a usar na GitHub Copilot API. Exemplos: gpt-4o, gpt-4o-mini, claude-3.5-sonnet.",
+            "help": "Use a model available through `gh models list`, for example openai/gpt-4.1.",
+        },
+        {
+            "key": "GITHUB_MODELS_ORG",
+            "label": "GitHub Models Organization (optional)",
+            "secret": False,
+            "help": "Optional. Attribute GitHub Models usage to a specific organization when supported by your account.",
         },
     ],
 }
@@ -205,7 +211,10 @@ def render_settings_tab():
 
 def build_settings_for_run(pr_urls: list[str]) -> Settings:
     for k, v in st.session_state.env_values.items():
-        os.environ[k] = v
+        # Não sobrescrever variáveis de ambiente com valores vazios — mantém o
+        # valor original do .env que foi carregado no startup do processo.
+        if v:
+            os.environ[k] = v
 
     joined = ",".join(pr_urls)
     os.environ["GITHUB_PR_URL"] = joined

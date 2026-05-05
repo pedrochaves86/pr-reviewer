@@ -19,10 +19,11 @@ class Settings:
     github_token: str = field(default_factory=lambda: os.getenv("GITHUB_TOKEN", ""))
     github_reviewer_login: str = field(default_factory=lambda: os.getenv("GITHUB_REVIEWER_LOGIN", ""))
 
-    # ── GitHub Copilot API ────────────────────────────────────────────────
-    copilot_model: str = field(
-        default_factory=lambda: (os.getenv("COPILOT_MODEL", "") or "gpt-4o")
+    # ── GitHub Models via gh CLI ──────────────────────────────────────────
+    github_models_model: str = field(
+        default_factory=lambda: (os.getenv("GITHUB_MODELS_MODEL", "") or "openai/gpt-4.1")
     )
+    github_models_org: str = field(default_factory=lambda: os.getenv("GITHUB_MODELS_ORG", ""))
 
     # ── SonarQube (opcional) ───────────────────────────────────────────────
     sonar_url: str = field(default_factory=lambda: os.getenv("SONAR_URL", ""))

@@ -1,17 +1,15 @@
 """
-Analisador de código via GitHub Copilot API.
+Analisador de código via gh models CLI.
 Recebe diff + metadados e devolve uma review estruturada.
 """
 
 import json
 import logging
 import re
-import time
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
-
-import requests
-from openai import OpenAI, AuthenticationError, PermissionDeniedError
 
 from config.settings import Settings
 
@@ -19,8 +17,7 @@ log = logging.getLogger(__name__)
 
 MAX_DIFF_CHARS = 20_000  # ~5k tokens
 
-COPILOT_API_BASE = "https://api.githubcopilot.com"
-COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
+
 
 
 @dataclass
@@ -69,75 +66,134 @@ Regras:
 
 class AIAnalyzer:
     def __init__(self, settings: Settings):
-        self.model = settings.copilot_model
+        self.model = settings.github_models_model
+        self.org = settings.github_models_org
+        self._validated_model: str | None = None
         self.language = settings.review_language
-        if not settings.github_token:
-            raise EnvironmentError(
-                "GITHUB_TOKEN não configurado. "
-                "É necessário para autenticar na GitHub Copilot API."
-            )
-        self._github_token = settings.github_token
-        self._copilot_token: str | None = None
-        self._copilot_token_expires_at: float = 0.0
 
-    def _get_copilot_token(self) -> str:
-        """Troca o GitHub PAT por um token de curta duração da Copilot API."""
-        now = time.time()
-        if self._copilot_token and now < self._copilot_token_expires_at - 60:
-            return self._copilot_token
-
-        resp = requests.post(
-            COPILOT_TOKEN_URL,
-            headers={
-                "Authorization": f"token {self._github_token}",
-                "Accept": "application/json",
-                "Editor-Version": "vscode/1.99.0",
-                "Editor-Plugin-Version": "copilot/1.155.0",
-                "User-Agent": "GithubCopilot/1.155.0",
-            },
-            timeout=15,
-        )
-        if resp.status_code == 401:
+    @staticmethod
+    def _run_gh_command(args: list[str], *, input_text: str | None = None, timeout: int = 120) -> str:
+        gh_path = shutil.which("gh")
+        if not gh_path:
             raise RuntimeError(
-                "GITHUB_TOKEN inválido ou expirado. Verifica o token no ficheiro .env."
+                "GitHub CLI (`gh`) não encontrado no PATH. "
+                "Instala o GitHub CLI e a extensão `github/gh-models`."
             )
-        if resp.status_code == 403:
-            raise RuntimeError(
-                "A conta não tem acesso ao GitHub Copilot. "
-                "Confirma que tens uma subscrição Copilot ativa em https://github.com/settings/copilot"
-            )
-        resp.raise_for_status()
 
-        data = resp.json()
-        self._copilot_token = data["token"]
-        self._copilot_token_expires_at = data.get("expires_at", now + 1800)
-        log.debug("Copilot token obtido com sucesso.")
-        return self._copilot_token
-
-    def _call_copilot(self, user_msg: str) -> str:
-        log.info(f"A enviar diff para GitHub Copilot API (modelo: {self.model})...")
-        copilot_token = self._get_copilot_token()
-        client = OpenAI(base_url=COPILOT_API_BASE, api_key=copilot_token)
+        cmd = [gh_path, *args]
         try:
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-                max_tokens=4096,
+            completed = subprocess.run(
+                cmd,
+                input=input_text,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
             )
-        except AuthenticationError as exc:
-            raise RuntimeError(
-                "Token Copilot inválido. Tenta novamente — o token de sessão pode ter expirado."
-            ) from exc
-        except PermissionDeniedError as exc:
-            raise RuntimeError(
-                "A conta não tem acesso ao GitHub Copilot. "
-                "Confirma que tens uma subscrição Copilot ativa."
-            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("O comando `gh models` excedeu o tempo limite.") from exc
 
-        return response.choices[0].message.content or ""
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        if completed.returncode == 0:
+            return stdout
+
+        combined = "\n".join(part for part in [stderr, stdout] if part).strip()
+        lower_combined = combined.lower()
+        if "unknown command \"models\"" in lower_combined or "gh models" in lower_combined and "extension" in lower_combined:
+            raise RuntimeError(
+                "A extensão `gh models` não está instalada. "
+                "Corre `gh extension install github/gh-models` e autentica-te com `gh auth login`."
+            )
+        if "gh auth login" in lower_combined or "no github token found" in lower_combined:
+            raise RuntimeError(
+                "O `gh models` não está autenticado. "
+                "Corre `gh auth login` antes de executar o reviewer."
+            )
+        if '"code":"no_access"' in lower_combined or "no access to model" in lower_combined:
+            raise RuntimeError(
+                "A conta autenticada não tem acesso de inferência ao modelo configurado em `gh models`. "
+                "Confirma no tenant quais modelos podem ser usados com `gh models run` ou define `GITHUB_MODELS_MODEL` para um modelo autorizado."
+            )
+        if combined:
+            raise RuntimeError(f"Falha ao executar `{' '.join(cmd)}`: {combined}")
+        raise RuntimeError(f"Falha ao executar `{' '.join(cmd)}` (exit code {completed.returncode}).")
+
+    @staticmethod
+    def _match_model(target_model: str, model_ids: list[str]) -> str | None:
+        if target_model in model_ids:
+            return target_model
+
+        normalized_target = target_model.strip().lower()
+        if not normalized_target:
+            return None
+
+        for model_id in model_ids:
+            normalized_model_id = model_id.lower()
+            if normalized_model_id == normalized_target:
+                return model_id
+            if normalized_model_id.endswith(f"/{normalized_target}"):
+                return model_id
+
+        return None
+
+    def _resolve_validated_model(self) -> str:
+        if self._validated_model:
+            return self._validated_model
+
+        target_model = self.model
+        try:
+            output = self._run_gh_command(["models", "list"], timeout=30)
+            model_ids = []
+            for line in output.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("ID ") or stripped.startswith("Showing "):
+                    continue
+
+                model_id = stripped.split()[0]
+                if "/" in model_id:
+                    model_ids.append(model_id)
+
+            matched_model = self._match_model(target_model, model_ids)
+            if matched_model:
+                self._validated_model = matched_model
+                if matched_model != target_model:
+                    log.info(
+                        f"Modelo '{target_model}' validado no catálogo como '{self._validated_model}'."
+                    )
+                return self._validated_model
+
+            if model_ids:
+                log.info(
+                    f"Modelos disponíveis via `gh models list`: {', '.join(model_ids[:5])}"
+                )
+
+            log.warning(
+                f"Modelo '{target_model}' não encontrado em `gh models list`. A usar valor configurado diretamente."
+            )
+        except RuntimeError as exc:
+            log.warning(f"Falha ao validar catálogo de modelos via gh: {exc}")
+
+        self._validated_model = target_model
+        return self._validated_model
+
+    def _call_github_models(self, user_msg: str) -> str:
+        model = self._resolve_validated_model()
+
+        cmd = [
+            "models",
+            "run",
+            model,
+            "--system-prompt",
+            SYSTEM_PROMPT,
+            "--max-tokens",
+            "4096",
+        ]
+        if self.org:
+            cmd.extend(["--org", self.org])
+
+        log.info(f"A usar gh models (modelo: {model})...")
+        return self._run_gh_command(cmd, input_text=user_msg, timeout=180)
 
     @staticmethod
     def _changed_lines(diff: str) -> dict[str, set[int]]:
@@ -237,7 +293,8 @@ class AIAnalyzer:
 
         user_msg = self._build_prompt(pr_info, diff_truncated, sonar_findings, checkmarx_findings)
 
-        raw_text = self._call_copilot(user_msg).strip()
+        log.info(f"A enviar diff para gh models ({len(diff_truncated)} chars)...")
+        raw_text = self._call_github_models(user_msg).strip()
         # Extrai JSON de dentro de um bloco markdown, se presente
         md_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_text)
         if md_match:
